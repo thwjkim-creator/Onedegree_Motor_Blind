@@ -1,0 +1,4 @@
+build/
+mosquitto.conf
+*.md
+.vscode/
