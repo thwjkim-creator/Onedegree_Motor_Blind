@@ -221,7 +221,6 @@ void app_main(void)
 #elif TEST_STAGE == 3
 #include "nvs_flash.h"
 #include "esp_wifi.h"
-#include "esp_ota_ops.h"
 #include "driver/gpio.h"
 #include "mqtt_client.h"
 #include "motor.h"
@@ -229,8 +228,9 @@ void app_main(void)
 #include "ota.h"
 #include "motor_task.h"
 
-#define MQTT_URI             "mqtt://broker.hivemq.com:1883"
+// #define MQTT_URI             "mqtt://broker.hivemq.com:1883"
 // #define MQTT_URI             "mqtt://172.21.101.31:1883"
+#define MQTT_URI             "mqtt://ec2-100-54-40-70.compute-1.amazonaws.com:1883"
 #define MQTT_TOPIC_PREFIX    "onedegree/motor_blind/device"
 
 void app_main(void)
@@ -244,10 +244,9 @@ void app_main(void)
     gpio_set_level(MOTOR_A_GPIO, 0);
     gpio_set_level(MOTOR_B_GPIO, 0);
 
-    /* [1] OTA 롤백 방지 — 이 앱을 유효 파티션으로 확정 */
-    esp_ota_mark_app_valid_cancel_rollback();
-
-    /* [2] NVS 초기화 */
+    /* [1] NVS 초기화
+     * (OTA 롤백 확정은 motor_task.c의 MQTT 최초 연결 성공 시로 이동 —
+     *  네트워크 연결 실패 시 자동 롤백이 실제로 동작하도록 함) */
     esp_err_t nvs_ret = nvs_flash_init();
     if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -257,10 +256,10 @@ void app_main(void)
 
     ESP_LOGI(TAG, "=== Stage 3: MQTT + 캐스케이드 PI (v%s) ===", CURRENT_FIRMWARE_VERSION);
 
-    /* [3] WiFi (BLE 프로비저닝) — 반환 시 IP 획득 보장 */
+    /* [2] WiFi (BLE 프로비저닝) — 반환 시 IP 획득 보장 */
     wifi_prov_init();
 
-    /* [4] OTA 버전 확인 — 신버전이면 다운로드 후 재부팅 */
+    /* [3] OTA 버전 확인 — 신버전이면 다운로드 후 재부팅 */
     ota_check_and_update();
 
     /* MAC → device_id + 구독/발행 토픽 생성 */
@@ -274,7 +273,7 @@ void app_main(void)
     snprintf(pub_topic,  sizeof(pub_topic),  "%s/%s/status", MQTT_TOPIC_PREFIX, device_id);
     ESP_LOGI(TAG, "device_id=%s  sub=%s", device_id, sub_topic);
 
-    /* [5] MQTT 클라이언트 생성 + 모터 태스크 시작 */
+    /* [4] MQTT 클라이언트 생성 + 모터 태스크 시작 */
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri    = MQTT_URI,
         .credentials.client_id = device_id,
