@@ -6,6 +6,8 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_ota_ops.h"
+#include "nvs.h"
 #include "mqtt_client.h"
 #include "cJSON.h"
 #include "motor.h"
@@ -13,6 +15,10 @@
 #include "motor_task.h"
 
 static const char *TAG = "motor_task";
+
+/* 위치 영구저장 (재부팅 후에도 홈 기준 위치 유지) */
+#define NVS_NAMESPACE   "motor"
+#define NVS_KEY_POS     "pos_cnt"
 
 /* ── 제어 파라미터 ────────────────────────────────────────────── */
 #define PI_DT_MS        10       /* 제어 주기 (ms) */
@@ -38,6 +44,8 @@ static char                      s_pub_topic[64];
 static esp_mqtt_client_handle_t  s_mqtt_client;
 static int32_t                   s_position_counts = 0;
 static bool                      s_dir_inverted    = false;
+static nvs_handle_t              s_nvs_handle;
+static bool                      s_rollback_marked = false;
 
 /* 방향 반전 플래그 반영 — FORWARD/REVERSE 외 값(BRAKE, COAST)은 그대로 통과 */
 static inline motor_dir_t apply_dir(motor_dir_t d)
@@ -58,6 +66,14 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGI(TAG, "MQTT 연결됨 → 구독: %s", s_sub_topic);
         esp_mqtt_client_subscribe(ev->client, s_sub_topic, 0);
         esp_mqtt_client_publish(ev->client, s_pub_topic, "{\"status\":\"online\"}", 0, 0, 0);
+
+        if (!s_rollback_marked) {
+            /* WiFi+MQTT 브로커까지 실제로 연결된 것을 확인한 뒤에야 이 앱을
+             * 유효 파티션으로 확정 — 그래야 네트워크 연결 실패 시 OTA 롤백이 동작함 */
+            esp_ota_mark_app_valid_cancel_rollback();
+            s_rollback_marked = true;
+            ESP_LOGI(TAG, "OTA rollback 방지 확정 (MQTT 연결 성공)");
+        }
 
     } else if (id == MQTT_EVENT_DATA) {
         char buf[128] = {0};
@@ -222,6 +238,21 @@ static void motor_task_fn(void *arg)
     esp_log_level_set("motor", ESP_LOG_WARN);
     detect_encoder_dir();
 
+    esp_err_t nvs_err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &s_nvs_handle);
+    if (nvs_err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS open 실패 (0x%x) — 위치 0에서 시작", nvs_err);
+    } else {
+        int32_t saved_pos = 0;
+        nvs_err = nvs_get_i32(s_nvs_handle, NVS_KEY_POS, &saved_pos);
+        if (nvs_err == ESP_OK) {
+            s_position_counts = saved_pos;
+            ESP_LOGI(TAG, "저장된 위치 복원: %ld counts (%.3f rev)",
+                     (long)s_position_counts, (float)s_position_counts / COUNTS_PER_REV);
+        } else if (nvs_err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "저장된 위치 읽기 실패 (0x%x) — 위치 0에서 시작", nvs_err);
+        }
+    }
+
     motor_cmd_t cmd;
     for (;;) {
         xQueueReceive(s_cmd_q, &cmd, portMAX_DELAY);
@@ -245,6 +276,13 @@ static void motor_task_fn(void *arg)
 
         run_pi_task(target, cmd.spd);
         s_position_counts += encoder_get_count();
+
+        esp_err_t set_err = nvs_set_i32(s_nvs_handle, NVS_KEY_POS, s_position_counts);
+        if (set_err == ESP_OK) set_err = nvs_commit(s_nvs_handle);
+        if (set_err != ESP_OK) {
+            ESP_LOGW(TAG, "위치 저장 실패 (0x%x)", set_err);
+        }
+
         publish_position();
     }
 }
