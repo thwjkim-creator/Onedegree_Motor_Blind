@@ -274,6 +274,8 @@ static void motor_task_fn(void *arg)
             ESP_LOGW(TAG, "홈 위치 초과 방지: target → %ld counts", (long)target);
         }
 
+        publish_position();  /* 이동 시작 전 현재 위치 발행 */
+
         run_pi_task(target, cmd.spd);
         s_position_counts += encoder_get_count();
 
