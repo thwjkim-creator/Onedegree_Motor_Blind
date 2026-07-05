@@ -84,15 +84,21 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         cJSON *root = cJSON_Parse(buf);
         if (!root) { ESP_LOGW(TAG, "JSON 파싱 실패: %s", buf); return; }
 
-        cJSON *j_rot = cJSON_GetObjectItem(root, "rot");
-        cJSON *j_dir = cJSON_GetObjectItem(root, "dir");
-        cJSON *j_spd = cJSON_GetObjectItem(root, "spd");
+        cJSON *j_rot   = cJSON_GetObjectItem(root, "rot");
+        cJSON *j_dir   = cJSON_GetObjectItem(root, "dir");
+        cJSON *j_spd   = cJSON_GetObjectItem(root, "spd");
+        cJSON *j_reset = cJSON_GetObjectItem(root, "reset");
 
-        if (cJSON_IsNumber(j_rot) && cJSON_IsNumber(j_dir)) {
+        if (cJSON_IsTrue(j_reset)) {
+            motor_cmd_t cmd = { .rot = 0, .dir = 0, .spd = 0, .reset_home = true };
+            ESP_LOGI(TAG, "수신: reset=true (홈 위치 재설정)");
+            xQueueOverwrite(s_cmd_q, &cmd);
+        } else if (cJSON_IsNumber(j_rot) && cJSON_IsNumber(j_dir)) {
             motor_cmd_t cmd = {
-                .rot = (float)j_rot->valuedouble,
-                .dir = j_dir->valueint,
-                .spd = cJSON_IsNumber(j_spd) ? j_spd->valueint : 100,
+                .rot        = (float)j_rot->valuedouble,
+                .dir        = j_dir->valueint,
+                .spd        = cJSON_IsNumber(j_spd) ? j_spd->valueint : 100,
+                .reset_home = false,
             };
             ESP_LOGI(TAG, "수신: rot=%.2f  dir=%d  spd=%d", cmd.rot, cmd.dir, cmd.spd);
             xQueueOverwrite(s_cmd_q, &cmd);
@@ -100,6 +106,15 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             ESP_LOGW(TAG, "rot/dir 필드 없음");
         }
         cJSON_Delete(root);
+    }
+}
+
+static void save_position_to_nvs(void)
+{
+    esp_err_t err = nvs_set_i32(s_nvs_handle, NVS_KEY_POS, s_position_counts);
+    if (err == ESP_OK) err = nvs_commit(s_nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "위치 저장 실패 (0x%x)", err);
     }
 }
 
@@ -257,6 +272,15 @@ static void motor_task_fn(void *arg)
     for (;;) {
         xQueueReceive(s_cmd_q, &cmd, portMAX_DELAY);
 
+        if (cmd.reset_home) {
+            motor_stop();
+            s_position_counts = 0;
+            save_position_to_nvs();
+            ESP_LOGI(TAG, "홈 위치 재설정: count=0");
+            publish_position();
+            continue;
+        }
+
         if (cmd.dir == 0 || cmd.spd == 0) {
             motor_stop();
             ESP_LOGI(TAG, "정지");
@@ -278,12 +302,7 @@ static void motor_task_fn(void *arg)
 
         run_pi_task(target, cmd.spd);
         s_position_counts += encoder_get_count();
-
-        esp_err_t set_err = nvs_set_i32(s_nvs_handle, NVS_KEY_POS, s_position_counts);
-        if (set_err == ESP_OK) set_err = nvs_commit(s_nvs_handle);
-        if (set_err != ESP_OK) {
-            ESP_LOGW(TAG, "위치 저장 실패 (0x%x)", set_err);
-        }
+        save_position_to_nvs();
 
         publish_position();
     }

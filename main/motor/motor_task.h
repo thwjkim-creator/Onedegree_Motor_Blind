@@ -1,12 +1,14 @@
 #pragma once
 
+#include <stdbool.h>
 #include "mqtt_client.h"
 
 /* MQTT 명령 페이로드 구조체 */
 typedef struct {
-    float rot;  /* 회전 수 */
-    int   dir;  /* 1=정방향  -1=역방향  0=정지 */
-    int   spd;  /* 목표 속도 1~100% */
+    float rot;         /* 회전 수 */
+    int   dir;         /* 1=정방향  -1=역방향  0=정지 */
+    int   spd;         /* 목표 속도 1~100% */
+    bool  reset_home;  /* true면 모터 정지 후 현재 위치를 홈(0)으로 재설정 */
 } motor_cmd_t;
 
 /* 모터 태스크 및 MQTT 연결 초기화.
