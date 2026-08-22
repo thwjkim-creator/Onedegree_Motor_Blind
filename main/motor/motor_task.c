@@ -118,17 +118,19 @@ static void save_position_to_nvs(void)
     }
 }
 
-static void publish_position(void)
+static void publish_position(const char *event)
 {
-    char payload[32];
-    snprintf(payload, sizeof(payload), "{\"rot\":%.4f}",
-             (float)s_position_counts / COUNTS_PER_REV);
+    char payload[48];
+    snprintf(payload, sizeof(payload), "{\"rot\":%.4f,\"event\":\"%s\"}",
+             (float)s_position_counts / COUNTS_PER_REV, event);
     esp_mqtt_client_publish(s_mqtt_client, s_pub_topic, payload, 0, 0, 0);
     ESP_LOGI(TAG, "위치 발행: %s → %s", s_pub_topic, payload);
 }
 
 /* ── 캐스케이드 PI: 위치 P(외부) + 속도 PI(내부) ─────────────────── */
-static void run_pi_task(int32_t target, int spd)
+typedef enum { MOVE_DONE, MOVE_INTERRUPTED, MOVE_TIMEOUT } move_result_t;
+
+static move_result_t run_pi_task(int32_t target, int spd)
 {
     float    max_vel    = MAX_VEL_CPS * spd / 100.0f;
     uint32_t timeout_ms = (uint32_t)(fabsf((float)target) / max_vel * 1000.0f * 2.0f) + 2000;
@@ -149,7 +151,7 @@ static void run_pi_task(int32_t target, int spd)
         if (xQueuePeek(s_cmd_q, &peek, 0)) {
             motor_stop();
             ESP_LOGI(TAG, "새 명령 감지 – 동작 중단");
-            return;
+            return MOVE_INTERRUPTED;
         }
 
         int32_t cur     = encoder_get_count();
@@ -161,7 +163,7 @@ static void run_pi_task(int32_t target, int spd)
             motor_stop();
             ESP_LOGI(TAG, "완료: count=%ld  err=%.1f  (%.4f rev)",
                      (long)cur, pos_err, (float)cur / COUNTS_PER_REV);
-            return;
+            return MOVE_DONE;
         }
 
         float vel_setpoint = (pos_err >= 0.0f) ? max_vel : -max_vel;
@@ -202,6 +204,7 @@ static void run_pi_task(int32_t target, int spd)
     motor_stop();
     ESP_LOGW(TAG, "Timeout! count=%ld  target=%ld",
              (long)encoder_get_count(), (long)target);
+    return MOVE_TIMEOUT;
 }
 
 /* ── 부팅 시 엔코더 방향 자동 감지 ────────────────────────────────
@@ -277,14 +280,14 @@ static void motor_task_fn(void *arg)
             s_position_counts = 0;
             save_position_to_nvs();
             ESP_LOGI(TAG, "홈 위치 재설정: count=0");
-            publish_position();
+            publish_position("reset");
             continue;
         }
 
         if (cmd.dir == 0 || cmd.spd == 0) {
             motor_stop();
             ESP_LOGI(TAG, "정지");
-            publish_position();
+            publish_position("stop");
             continue;
         }
 
@@ -298,13 +301,25 @@ static void motor_task_fn(void *arg)
             ESP_LOGW(TAG, "홈 위치 초과 방지: target → %ld counts", (long)target);
         }
 
-        publish_position();  /* 이동 시작 전 현재 위치 발행 */
+        publish_position("move_start");  /* 이동 시작 전 현재 위치 발행 */
 
-        run_pi_task(target, cmd.spd);
+        move_result_t result = run_pi_task(target, cmd.spd);
         s_position_counts += encoder_get_count();
         save_position_to_nvs();
 
-        publish_position();
+        switch (result) {
+            case MOVE_DONE:
+                publish_position("move_done");
+                break;
+            case MOVE_TIMEOUT:
+                publish_position("move_timeout");
+                break;
+            case MOVE_INTERRUPTED:
+                publish_position("move_interrupted");
+                /* 다음 루프에서 큐에 있던 명령(stop/reset/새 이동)이 처리되며
+                   그에 맞는 이벤트가 추가로 발행됨 */
+                break;
+        }
     }
 }
 
