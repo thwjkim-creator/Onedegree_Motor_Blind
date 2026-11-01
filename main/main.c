@@ -229,7 +229,6 @@ void app_main(void)
 #include "motor_task.h"
 
 // #define MQTT_URI             "mqtt://broker.hivemq.com:1883"
-// #define MQTT_URI             "mqtt://172.21.101.31:1883"
 #define MQTT_URI             "mqtt://ec2-100-54-40-70.compute-1.amazonaws.com:1883"
 #define MQTT_TOPIC_PREFIX    "onedegree/motor_blind/device"
 
